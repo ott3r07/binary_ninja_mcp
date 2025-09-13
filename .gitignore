@@ -23,3 +23,6 @@ Desktop.ini
 *.log
 *.tmp
 *.bak
+
+.env
+.mcp_auto_setup_done

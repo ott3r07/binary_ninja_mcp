@@ -16,6 +16,34 @@ class BinaryNinjaEndpoints:
             else None,
         }
 
+    def get_entry_points(self) -> List[Dict[str, Any]]:
+        """Get entry point(s) for the current binary"""
+        return self.binary_ops.get_entry_points()
+
+    # -------- Multi-binary helpers --------
+    def list_binaries(self) -> Dict[str, Any]:
+        """List managed/open binaries with sequential ids (1..N) and active flag.
+
+        The server maintains internal keys for views; this endpoint presents
+        a user-friendly, 1-based index stable under sorting by filename.
+        """
+        raw = self.binary_ops.list_open_binaries()
+        out = []
+        for i, item in enumerate(raw, start=1):
+            out.append({
+                "id": str(i),
+                "filename": item.get("filename"),
+                "active": bool(item.get("active")),
+            })
+        return {"binaries": out}
+
+    def select_binary(self, ident: str) -> Dict[str, Any]:
+        """Select active binary by id or filename/basename."""
+        info = self.binary_ops.select_view(ident)
+        if not info:
+            return {"error": f"Binary not found: {ident}", "available": self.binary_ops.list_open_binaries()}
+        return {"status": "ok", "selected": info}
+
     def get_function_info(self, identifier: str) -> Optional[Dict[str, Any]]:
         """Get detailed information about a function"""
         try:
@@ -172,6 +200,40 @@ class BinaryNinjaEndpoints:
             bn.log_error(f"Error getting assembly for function: {e}")
             return None
 
+    def make_function_at(self, address: str | int, architecture: str | None = None) -> Dict[str, Any]:
+        """Create a function at an address (no-op if already exists).
+
+        On invalid/unknown platform (non-default arch parameter), returns an error object with
+        an exhaustive list of available platforms so clients/LLMs can choose properly.
+        """
+        try:
+            return self.binary_ops.make_function_at(address, architecture)
+        except ValueError as e:
+            # Enumerate all available platforms dynamically
+            platforms: list[str] = []
+            try:
+                plats_obj = getattr(bn, 'Platform', None)
+                if plats_obj is not None:
+                    try:
+                        platforms = [str(getattr(p, 'name', str(p))) for p in list(plats_obj)]
+                    except Exception:
+                        platforms = []
+            except Exception:
+                platforms = []
+            # Fallback list if BN enumeration fails
+            if not platforms:
+                platforms = [
+                    'decree-x86','efi-x86','efi-windows-x86','efi-x86_64','efi-windows-x86_64','efi-aarch64','efi-windows-aarch64','efi-armv7','efi-thumb2',
+                    'freebsd-x86','freebsd-x86_64','freebsd-aarch64','freebsd-armv7','freebsd-thumb2',
+                    'ios-aarch64','ios-armv7','ios-thumb2','ios-kernel-aarch64','ios-kernel-armv7','ios-kernel-thumb2',
+                    'linux-ppc32','linux-ppcvle32','linux-ppc64','linux-ppc32_le','linux-ppc64_le','linux-rv32gc','linux-rv64gc',
+                    'linux-x86','linux-x86_64','linux-x32','linux-aarch64','linux-armv7','linux-thumb2','linux-armv7eb','linux-thumb2eb',
+                    'linux-mipsel','linux-mips','linux-mips3','linux-mipsel3','linux-mips64','linux-cnmips64','linux-mipsel64',
+                    'mac-x86','mac-x86_64','mac-aarch64','mac-armv7','mac-thumb2','mac-kernel-x86','mac-kernel-x86_64','mac-kernel-aarch64','mac-kernel-armv7','mac-kernel-thumb2',
+                    'windows-x86','windows-x86_64','windows-aarch64','windows-armv7','windows-thumb2','windows-kernel-x86','windows-kernel-x86_64','windows-kernel-windows-aarch64',
+                ]
+            return {"error": str(e), "available_platforms": platforms}
+
     def define_types(self, c_code: str) -> Dict[str, str]:
         """Define types from C code string
         
@@ -237,6 +299,140 @@ class BinaryNinjaEndpoints:
         except Exception as e:
             raise ValueError(f"Failed to rename variable: {str(e)}")
 
+    def rename_variables(self, function_identifier: str | int, renames: List[Dict[str, str]] | Dict[str, str]) -> Dict[str, Any]:
+        """Rename multiple local variables in a function.
+
+        Args:
+            function_identifier: Function name or address
+            renames: Either a list of {"old": str, "new": str} pairs or a dict mapping old->new
+
+        Returns:
+            Dictionary with overall status and per-item results.
+
+        Raises:
+            RuntimeError: If no binary is loaded
+            ValueError: If the function is not found or inputs are invalid
+        """
+        if not self.binary_ops.current_view:
+            raise RuntimeError("No binary loaded")
+
+        # Resolve function first
+        func = self.binary_ops.get_function_by_name_or_address(function_identifier)
+        if not func:
+            raise ValueError(f"Function '{function_identifier}' not found")
+
+        # Normalize renames into ordered list of {old, new}
+        pairs: List[Dict[str, str]] = []
+        if isinstance(renames, dict):
+            for k, v in renames.items():
+                if k is None or v is None:
+                    continue
+                pairs.append({"old": str(k), "new": str(v)})
+        elif isinstance(renames, list):
+            for entry in renames:
+                try:
+                    old = entry.get("old") or entry.get("from") or entry.get("src") or entry.get("before")
+                    new = entry.get("new") or entry.get("to") or entry.get("dst") or entry.get("after")
+                except Exception:
+                    old = None
+                    new = None
+                if old is None or new is None:
+                    continue
+                pairs.append({"old": str(old), "new": str(new)})
+        else:
+            raise ValueError("Invalid 'renames' format; expected list of {old,new} or mapping old->new")
+
+        if not pairs:
+            raise ValueError("No valid rename pairs provided")
+
+        results: List[Dict[str, Any]] = []
+        success_count = 0
+
+        # Apply in order; later entries can refer to names produced by earlier renames
+        for idx, item in enumerate(pairs, start=1):
+            old_name = item.get("old")
+            new_name = item.get("new")
+            if not old_name or not new_name:
+                results.append({
+                    "index": idx,
+                    "old": old_name,
+                    "new": new_name,
+                    "success": False,
+                    "error": "Missing old or new name",
+                })
+                continue
+
+            try:
+                var = None
+                try:
+                    if hasattr(func, "get_variable_by_name"):
+                        var = func.get_variable_by_name(old_name)
+                except Exception:
+                    var = None
+                if not var:
+                    results.append({
+                        "index": idx,
+                        "old": old_name,
+                        "new": new_name,
+                        "success": False,
+                        "error": f"Variable '{old_name}' not found",
+                    })
+                    continue
+
+                # Primary method: direct property set
+                try:
+                    var.name = new_name
+                except Exception:
+                    # Fallback: attempt create_user_var with same storage/type but new name
+                    try:
+                        if hasattr(func, "create_user_var") and hasattr(var, "storage"):
+                            vtype = getattr(var, "type", None)
+                            if vtype is None:
+                                # attempt to infer type if possible
+                                vtype = getattr(bn, "Type", None)
+                            func.create_user_var(var, vtype, new_name)
+                        else:
+                            raise
+                    except Exception as e:
+                        results.append({
+                            "index": idx,
+                            "old": old_name,
+                            "new": new_name,
+                            "success": False,
+                            "error": f"Failed to rename: {e}",
+                        })
+                        continue
+
+                success_count += 1
+                results.append({
+                    "index": idx,
+                    "old": old_name,
+                    "new": new_name,
+                    "success": True,
+                })
+            except Exception as e:
+                results.append({
+                    "index": idx,
+                    "old": old_name,
+                    "new": new_name,
+                    "success": False,
+                    "error": str(e),
+                })
+
+        # Best-effort reanalysis for consistency
+        try:
+            func.reanalyze(bn.FunctionUpdateType.UserFunctionUpdate)
+        except Exception:
+            pass
+
+        return {
+            "status": "ok",
+            "function": func.name,
+            "address": hex(func.start),
+            "total": len(pairs),
+            "renamed": success_count,
+            "results": results,
+        }
 
     def retype_variable(self, function_name: str, name: str, type_str: str) -> Dict[str, str]:
         """Retype a variable inside a function
@@ -274,34 +470,219 @@ class BinaryNinjaEndpoints:
             raise ValueError(f"Failed to rename variable: {str(e)}")
 
 
-    def edit_function_signature(self, function_name: str, signature: str) -> Dict[str, str]:
-        """Rename a variable inside a function
-        
+    
+
+    def set_function_prototype(self, function_address: str | int, prototype: str) -> Dict[str, str]:
+        """Set a function's prototype by address.
+
         Args:
-            function_name: Name of the function to edit the signature of
-            signature: new signature to apply
-            
+            function_address: Function address (hex string like 0x401000 or integer)
+            prototype: C-style function prototype/type string (e.g., "int __cdecl f(int a)", or "int(int)" )
+
         Returns:
-            Dictionary with status message
-            
+            Dictionary with status message.
+
         Raises:
-            RuntimeError: If no binary is loaded
-            ValueError: If the function is not found or variable cannot be renamed
+            RuntimeError: If no binary is loaded.
+            ValueError: If the function or prototype is invalid.
         """
         if not self.binary_ops.current_view:
             raise RuntimeError("No binary loaded")
-            
-        # Find the function by name
-        function = self.binary_ops.get_function_by_name_or_address(function_name)
-        if not function:
-            raise ValueError(f"Function '{function_name}' not found")
-            
-        function.type = self.binary_ops.current_view.parse_type_string(signature)[0]
 
-        function.reanalyze(bn.FunctionUpdateType.UserFunctionUpdate)
-            
+        # Resolve function by name or address; do not auto-create if missing
+        func = self.binary_ops.get_function_by_name_or_address(function_address)
+        if not func:
+            raise ValueError(f"Function not found for identifier '{function_address}'")
+
+        # Normalize prototype (strip stray trailing semicolon)
+        proto = (prototype or "").strip()
+        if proto.endswith(";"):
+            proto = proto[:-1].strip()
+
+        # Best-effort parsing with fallbacks
+        t = None
+        last_error = None
         try:
-            return {"status": f"Successfully"}
+            t, _ = self.binary_ops.current_view.parse_type_string(proto)
         except Exception as e:
-            raise ValueError(f"Failed to rename variable: {str(e)}")
+            last_error = e
+            t = None
 
+        # Fallback 1: parse a declaration block and grab any function type
+        if t is None:
+            try:
+                pr = self.binary_ops.current_view.parse_types_from_string(proto)
+                if pr and getattr(pr, "types", None):
+                    # Prefer an entry matching the current function name
+                    chosen = None
+                    if func.name in pr.types:
+                        chosen = pr.types[func.name]
+                    else:
+                        # Otherwise pick the first type that looks like a function
+                        for name, tobj in pr.types.items():
+                            try:
+                                if hasattr(tobj, "type_class") and int(getattr(bn.enums, "TypeClass", object).FunctionTypeClass) == int(getattr(tobj, "type_class")):
+                                    chosen = tobj
+                                    break
+                            except Exception:
+                                # Fallback: accept the first one
+                                chosen = tobj
+                                break
+                    if chosen is not None:
+                        t = chosen
+            except Exception as e:
+                last_error = e
+
+        # Fallback 2: if the prototype looks like a bare "ret(args)" without a name,
+        # synthesize a declaration by inserting the function's name.
+        if t is None:
+            import re as _re
+            m = _re.match(r"^\s*([^()]+?)\s*\((.*)\)\s*$", proto)
+            if m and func and func.name and func.name not in proto:
+                ret = m.group(1).strip()
+                args = m.group(2).strip()
+                candidate = f"{ret} {func.name}({args})"
+                try:
+                    t, _ = self.binary_ops.current_view.parse_type_string(candidate)
+                except Exception as e:
+                    last_error = e
+
+        if t is None:
+            raise ValueError(f"Failed to parse prototype: {proto} ({last_error})")
+
+        # Apply and reanalyze
+        try:
+            func.type = t
+            func.reanalyze(bn.FunctionUpdateType.UserFunctionUpdate)
+        except Exception as e:
+            raise ValueError(f"Failed applying type: {str(e)}")
+
+        return {
+            "status": "ok",
+            "function": func.name,
+            "address": hex(func.start),
+            "applied_type": str(t),
+        }
+
+    def declare_c_type(self, c_declaration: str) -> Dict[str, Any]:
+        """Create or update a local type from a single C declaration.
+
+        Accepts any C type declaration (struct/union/enum/typedef/function type) and defines
+        the resulting named types in the current BinaryView's user types. If multiple types
+        are declared, all are applied.
+
+        Args:
+            c_declaration: C declaration string (e.g., "typedef struct { int a; } Foo;")
+
+        Returns:
+            Dictionary with keys:
+              - defined_types: map of type name -> declaration string
+              - count: number of types defined/updated
+
+        Raises:
+            RuntimeError: If no binary is loaded
+            ValueError: If parsing fails or no types are found
+        """
+        if not self.binary_ops.current_view:
+            raise RuntimeError("No binary loaded")
+
+        decl = (c_declaration or "").strip()
+        if not decl:
+            raise ValueError("Empty C declaration")
+
+        try:
+            result = self.binary_ops.current_view.parse_types_from_string(decl)
+        except Exception as e:
+            raise ValueError(f"Failed to parse declaration: {str(e)}")
+
+        if not result or not getattr(result, "types", {}):
+            raise ValueError("No named types found in declaration")
+
+        defined: Dict[str, str] = {}
+        for name, type_obj in result.types.items():
+            try:
+                self.binary_ops.current_view.define_user_type(name, type_obj)
+                defined[str(name)] = str(type_obj)
+            except Exception as e:
+                raise ValueError(f"Failed to define type '{name}': {str(e)}")
+
+        return {"defined_types": defined, "count": len(defined)}
+
+    def set_local_variable_type(self, function_address: str | int, variable_name: str, new_type: str) -> Dict[str, str]:
+        """Set a local variable's type in a function.
+
+        Args:
+            function_address: Function identifier (address in hex or int, or name)
+            variable_name: Local variable name to retype
+            new_type: C type string (e.g., "int *", "const char*", "struct Foo*")
+
+        Returns:
+            Dictionary with status message.
+
+        Raises:
+            RuntimeError: If no binary is loaded
+            ValueError: If function/variable/type are invalid
+        """
+        if not self.binary_ops.current_view:
+            raise RuntimeError("No binary loaded")
+
+        func = self.binary_ops.get_function_by_name_or_address(function_address)
+        if not func:
+            raise ValueError(f"Function '{function_address}' not found")
+
+        if not variable_name:
+            raise ValueError("Missing variable name")
+
+        # Resolve the variable by name
+        var = None
+        try:
+            if hasattr(func, "get_variable_by_name"):
+                var = func.get_variable_by_name(variable_name)
+        except Exception:
+            var = None
+
+        if not var:
+            raise ValueError(f"Variable '{variable_name}' not found in function '{func.name}'")
+
+        # Parse type string
+        try:
+            t, _ = self.binary_ops.current_view.parse_type_string((new_type or "").strip())
+        except Exception:
+            t = None
+        if t is None:
+            # Fall back to assigning the string if BN API supports it; otherwise fail
+            try:
+                var.type = new_type
+                applied = str(new_type)
+            except Exception:
+                raise ValueError(f"Failed to parse type: '{new_type}'")
+        else:
+            # Apply via variable object or function API
+            applied = str(t)
+            try:
+                var.type = t
+            except Exception:
+                # Try create_user_var if direct assignment fails
+                try:
+                    if hasattr(func, "create_user_var") and hasattr(var, "storage"):
+                        func.create_user_var(var, t, variable_name)
+                    else:
+                        raise ValueError("Retyping not supported by this Binary Ninja API version")
+                except Exception as e:
+                    raise ValueError(f"Failed to set variable type: {str(e)}")
+
+        # Trigger reanalysis for consistency
+        try:
+            func.reanalyze(bn.FunctionUpdateType.UserFunctionUpdate)
+        except Exception:
+            pass
+
+        return {
+            "status": "ok",
+            "function": func.name,
+            "address": hex(func.start),
+            "variable": variable_name,
+            "applied_type": applied,
+        }
+
+    # display_as removed per request
