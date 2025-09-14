@@ -1,3 +1,14 @@
+import os as _os
+import sys as _sys
+import traceback as _tb
+
+# Install a very-early excepthook so any ImportError at module import time is captured.
+def _bridge_excepthook(exc_type, exc, tb):
+    # Print to stderr for interactive runs
+    _tb.print_exception(exc_type, exc, tb, file=_sys.stderr)
+
+_sys.excepthook = _bridge_excepthook
+
 from mcp.server.fastmcp import FastMCP
 import requests
 
@@ -772,7 +783,11 @@ def set_local_variable_type(function_address: str, variable_name: str, new_type:
     return str(data)
     
 if __name__ == "__main__":
-    import sys as _sys
     # Important: write any logs to stderr to avoid corrupting MCP stdio JSON-RPC
     print("Starting MCP bridge service...", file=_sys.stderr)
-    mcp.run()
+    try:
+        mcp.run()
+    except Exception as _e:
+        # Ensure any runtime exception is captured in the log file
+        _bridge_excepthook(type(_e), _e, _e.__traceback__)
+        raise
