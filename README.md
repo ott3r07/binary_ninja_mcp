@@ -9,7 +9,7 @@ This repository contains a Binary Ninja plugin, MCP server, and bridge that enab
 - ⚡ Seamless, real-time integration between Binary Ninja and MCP clients
 - 🧠 Enhanced reverse engineering workflow with AI assistance
 - 🤝 Support for every MCP client (Cline, Claude desktop, Roo Code, etc.)
-- 🗂️ Open multiple binaries and switch the active target automatically by the LLMs — no restart required
+- 🗂️ Open multiple binaries and switch the active target automatically
 
 ## Examples
 
@@ -60,7 +60,7 @@ You may install the extension through Binary Ninja's Plugin Manager (`Plugins > 
 
 To manually install the extension, this repository can be copied into the [Binary Ninja plugins folder](https://docs.binary.ninja/guide/plugins.html).
 
-### [Optional] Manually Setup MCP Client
+### [Optional] Manual Setup of the MCP Client
 
 *You do NOT need to set this up manually if you use a supported MCP client and follow the installation steps before.*
 
@@ -122,7 +122,7 @@ Your task is to analyze an unknown file which is currently open in Binary Ninja.
 - Based only on these findings, make an assessment on whether the file is malicious or not.
 ```
 
-## Supported Integrations
+## Supported Capabilities
 
 The following table lists the available MCP functions for use:
 
