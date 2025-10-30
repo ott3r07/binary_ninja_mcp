@@ -1623,6 +1623,28 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     bn.log_error(f"Error handling declareCType request: {e}")
                     self._send_json_response({"error": str(e)}, 500)
+
+            # ===== Fuzzing GET Endpoints - kAFL Integration =====
+            elif path == "/fuzzTargets":
+                min_complexity = int(params.get("minComplexity", [5])[0])
+                max_targets = int(params.get("maxTargets", [20])[0])
+                result = self.endpoints.identify_fuzz_targets(min_complexity, max_targets)
+                self._send_json_response(result)
+
+            elif path == "/analyzeFunctionInputs":
+                func_name = params.get("name", [None])[0]
+                param_index = int(params.get("paramIndex", [0])[0])
+                if not func_name:
+                    self._send_json_response({"error": "Missing function name"}, 400)
+                    return
+                result = self.endpoints.analyze_function_inputs(func_name, param_index)
+                self._send_json_response(result)
+
+            elif path == "/dangerousOperations":
+                func_name = params.get("function", [None])[0]
+                result = self.endpoints.find_dangerous_operations(func_name)
+                self._send_json_response(result)
+
             else:
                 self._send_json_response({"error": "Not found"}, 404)
 
@@ -2055,6 +2077,28 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                             "message": "No comment found for this function",
                         }
                     )
+
+            # ===== Fuzzing POST Endpoints - kAFL Integration =====
+            elif path == "/generateHarness":
+                target_function = params.get("target_function")
+                input_spec = params.get("input_spec")
+                harness_type = params.get("harness_type", "kernel")
+                result = self.endpoints.generate_harness(target_function, input_spec, harness_type)
+                self._send_json_response(result)
+
+            elif path == "/generateSeeds":
+                input_spec = params.get("input_spec")
+                num_seeds = params.get("num_seeds", 100)
+                strategies = params.get("strategies")
+                result = self.endpoints.generate_seeds(input_spec, num_seeds, strategies)
+                self._send_json_response(result)
+
+            elif path == "/exportKaflProject":
+                target_function = params.get("target_function")
+                output_directory = params.get("output_directory")
+                include_analysis = params.get("include_analysis", True)
+                result = self.endpoints.export_kafl_project(target_function, output_directory, include_analysis)
+                self._send_json_response(result)
 
             else:
                 self._send_json_response({"error": "Not found"}, 404)

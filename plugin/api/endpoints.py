@@ -686,3 +686,187 @@ class BinaryNinjaEndpoints:
         }
 
     # display_as removed per request
+
+    # ========================================================================
+    # Fuzzing Endpoints - kAFL Integration
+    # ========================================================================
+
+    def identify_fuzz_targets(self, min_complexity: int = 5, max_targets: int = 20) -> Dict[str, Any]:
+        """Identify and rank potential fuzzing targets"""
+        if not self.binary_ops.current_view:
+            raise RuntimeError("No binary loaded")
+
+        from ..core.fuzz_target_analyzer import FuzzTargetAnalyzer
+
+        analyzer = FuzzTargetAnalyzer(self.binary_ops.current_view)
+        targets = analyzer.rank_targets(min_complexity, max_targets)
+        report = analyzer.export_target_report(targets)
+
+        return report
+
+    def analyze_function_inputs(self, function_name: str, param_index: int = 0) -> Dict[str, Any]:
+        """Analyze how a function consumes input data"""
+        if not self.binary_ops.current_view:
+            raise RuntimeError("No binary loaded")
+
+        func = self.binary_ops.get_function_by_name_or_address(function_name)
+        if not func:
+            raise ValueError(f"Function {function_name} not found")
+
+        from ..core.input_analyzer import InputAnalyzer
+
+        analyzer = InputAnalyzer(self.binary_ops.current_view)
+        input_spec = analyzer.analyze_function_input(func, param_index)
+        result = analyzer.export_spec_json(input_spec)
+
+        return result
+
+    def find_dangerous_operations(self, function_name: Optional[str] = None) -> Dict[str, Any]:
+        """Find potentially dangerous operations"""
+        if not self.binary_ops.current_view:
+            raise RuntimeError("No binary loaded")
+
+        from ..core.fuzz_target_analyzer import FuzzTargetAnalyzer
+
+        analyzer = FuzzTargetAnalyzer(self.binary_ops.current_view)
+
+        if function_name:
+            func = self.binary_ops.get_function_by_name_or_address(function_name)
+            if not func:
+                raise ValueError(f"Function {function_name} not found")
+
+            ops = analyzer.find_dangerous_operations(func)
+
+            result = {
+                'function': function_name,
+                'operations': [
+                    {'type': op[0].value, 'address': hex(op[1])}
+                    for op in ops
+                ]
+            }
+        else:
+            # Find dangerous operations across all functions
+            all_ops = {}
+
+            for func in self.binary_ops.current_view.functions:
+                ops = analyzer.find_dangerous_operations(func)
+                if ops:
+                    all_ops[func.name] = [
+                        {'type': op[0].value, 'address': hex(op[1])}
+                        for op in ops
+                    ]
+
+            result = {'operations_by_function': all_ops}
+
+        return result
+
+    def generate_harness(self, target_function: str, input_spec: Dict[str, Any],
+                        harness_type: str = "kernel") -> Dict[str, Any]:
+        """Generate kAFL fuzzing harness"""
+        if not self.binary_ops.current_view:
+            raise RuntimeError("No binary loaded")
+
+        import json
+        from ..core.harness_generator import generate_harness_from_config
+
+        try:
+            input_spec_json = json.dumps(input_spec)
+            files = generate_harness_from_config(
+                self.binary_ops.current_view,
+                target_function,
+                input_spec_json,
+                harness_type
+            )
+
+            return {
+                'success': True,
+                'files': files
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
+    def generate_seeds(self, input_spec: Dict[str, Any], num_seeds: int = 100,
+                      strategies: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Generate seed corpus for fuzzing"""
+        if not self.binary_ops.current_view:
+            raise RuntimeError("No binary loaded")
+
+        from ..core.seed_generator import SeedGenerator
+        from ..core.input_analyzer import InputSpec
+
+        # Reconstruct InputSpec from dict
+        input_spec_obj = InputSpec(
+            input_type=input_spec.get('input_type', 'buffer'),
+            size=input_spec.get('size'),
+            min_size=input_spec.get('min_size'),
+            max_size=input_spec.get('max_size'),
+        )
+
+        if strategies is None:
+            strategies = ['minimal', 'boundary', 'magic_values', 'structured']
+
+        generator = SeedGenerator(self.binary_ops.current_view)
+        seeds = generator.generate_seed_corpus(input_spec_obj, num_seeds, strategies)
+
+        # Return seed metadata (not full data, too large)
+        result = {
+            'count': len(seeds),
+            'seeds': [
+                {
+                    'name': s.name,
+                    'size': len(s.data),
+                    'strategy': s.strategy.value,
+                    'description': s.description,
+                    'data_preview': s.data[:64].hex() if len(s.data) > 64 else s.data.hex(),
+                }
+                for s in seeds
+            ]
+        }
+
+        return result
+
+    def export_kafl_project(self, target_function: str, output_directory: str,
+                           include_analysis: bool = True) -> Dict[str, Any]:
+        """Export complete kAFL fuzzing project"""
+        if not self.binary_ops.current_view:
+            raise RuntimeError("No binary loaded")
+
+        if not target_function or not output_directory:
+            raise ValueError("Missing required parameters")
+
+        # Find target
+        func = self.binary_ops.get_function_by_name_or_address(target_function)
+        if not func:
+            raise ValueError(f"Function {target_function} not found")
+
+        from ..core.fuzz_target_analyzer import FuzzTargetAnalyzer
+        from ..core.input_analyzer import InputAnalyzer
+        from ..core.kafl_integration import KAFLProject
+
+        # Analyze target
+        target_analyzer = FuzzTargetAnalyzer(self.binary_ops.current_view)
+        target = target_analyzer.analyze_function(func)
+
+        # Analyze inputs
+        input_analyzer = InputAnalyzer(self.binary_ops.current_view)
+        input_spec = input_analyzer.analyze_function_input(func, 0)
+
+        # Create project
+        project = KAFLProject(self.binary_ops.current_view, target, input_spec)
+
+        try:
+            manifest = project.generate(output_directory)
+
+            return {
+                'success': True,
+                'manifest': manifest,
+                'output_directory': output_directory
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }

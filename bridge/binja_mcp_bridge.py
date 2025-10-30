@@ -781,7 +781,210 @@ def set_local_variable_type(function_address: str, variable_name: str, new_type:
     if isinstance(data, dict) and "error" in data:
         return f"Error: {data['error']}"
     return str(data)
-    
+
+# ========================================================================
+# Fuzzing Tools - kAFL Integration
+# ========================================================================
+
+@mcp.tool()
+def identify_fuzz_targets(min_complexity: int = 5, max_targets: int = 20) -> str:
+    """Identify and rank potential fuzzing targets in the binary.
+
+    Analyzes the loaded binary to find functions that would make good
+    fuzzing targets based on complexity, input handling, dangerous operations,
+    and code coverage potential.
+
+    Args:
+        min_complexity: Minimum cyclomatic complexity for targets
+        max_targets: Maximum number of targets to return
+
+    Returns:
+        JSON report with ranked fuzzing targets and their scores
+    """
+    data = get_json("fuzzTargets", {"minComplexity": min_complexity, "maxTargets": max_targets})
+    if not data:
+        return "Error: no response"
+    if isinstance(data, dict) and "error" in data:
+        return f"Error: {data['error']}"
+
+    import json
+    return json.dumps(data, indent=2)
+
+@mcp.tool()
+def analyze_function_inputs(function_name: str, param_index: int = 0) -> str:
+    """Analyze how a function consumes input data.
+
+    Performs data flow analysis to understand input structure,
+    identify constraints, and extract format hints.
+
+    Args:
+        function_name: Name or address of function to analyze
+        param_index: Parameter index to analyze (default: 0)
+
+    Returns:
+        JSON specification of input format including structure,
+        constraints, and format hints
+    """
+    data = get_json("analyzeFunctionInputs", {"name": function_name, "paramIndex": param_index})
+    if not data:
+        return "Error: no response"
+    if isinstance(data, dict) and "error" in data:
+        return f"Error: {data['error']}"
+
+    import json
+    return json.dumps(data, indent=2)
+
+@mcp.tool()
+def find_dangerous_operations(function_name: str = None) -> str:
+    """Find potentially dangerous operations that could lead to vulnerabilities.
+
+    Scans for operations like memory copies, pointer dereferences, array accesses,
+    type casts, and arithmetic that might be exploitable.
+
+    Args:
+        function_name: Specific function to analyze, or None for all functions
+
+    Returns:
+        JSON report of dangerous operations by type and location
+    """
+    params = {}
+    if function_name:
+        params["function"] = function_name
+
+    data = get_json("dangerousOperations", params)
+    if not data:
+        return "Error: no response"
+    if isinstance(data, dict) and "error" in data:
+        return f"Error: {data['error']}"
+
+    import json
+    return json.dumps(data, indent=2)
+
+@mcp.tool()
+def generate_kafl_harness(target_function: str, input_spec: str, harness_type: str = "kernel") -> str:
+    """Generate complete kAFL fuzzing harness for a target function.
+
+    Creates all necessary files for kAFL fuzzing including C harness code,
+    build configuration, and kAFL configuration file.
+
+    Args:
+        target_function: Name of function to fuzz
+        input_spec: JSON string with input specification from analyze_function_inputs
+        harness_type: Type of harness ("kernel", "userspace", "driver", "uefi")
+
+    Returns:
+        JSON with generated file contents
+    """
+    import json
+
+    try:
+        input_spec_dict = json.loads(input_spec)
+    except json.JSONDecodeError:
+        return "Error: input_spec must be valid JSON"
+
+    payload = {
+        "target_function": target_function,
+        "input_spec": input_spec_dict,
+        "harness_type": harness_type
+    }
+
+    data = post_json("generateHarness", payload)
+    if not data:
+        return "Error: no response"
+    if isinstance(data, dict) and "error" in data:
+        return f"Error: {data['error']}"
+
+    if isinstance(data, dict) and data.get("success") and "files" in data:
+        file_list = ", ".join(data["files"].keys())
+        return f"Generated harness files: {file_list}\n\nUse export_kafl_project to save to disk."
+
+    return json.dumps(data, indent=2)
+
+@mcp.tool()
+def generate_seed_corpus(input_spec: str, num_seeds: int = 100,
+                        strategies: list[str] = None) -> str:
+    """Generate seed corpus for fuzzing.
+
+    Creates initial test inputs using multiple strategies:
+    - minimal: Minimal valid inputs
+    - boundary: Boundary value testing
+    - magic_values: Common magic numbers and signatures
+    - structured: Valid structure instances
+    - constraint_sat: Constraint-satisfying inputs
+    - mutation: Mutations of base seeds
+
+    Args:
+        input_spec: JSON string with input specification
+        num_seeds: Number of seeds to generate
+        strategies: List of generation strategies to use
+
+    Returns:
+        JSON with seed metadata and previews
+    """
+    import json
+
+    try:
+        input_spec_dict = json.loads(input_spec)
+    except json.JSONDecodeError:
+        return "Error: input_spec must be valid JSON"
+
+    if strategies is None:
+        strategies = ["minimal", "boundary", "magic_values", "structured"]
+
+    payload = {
+        "input_spec": input_spec_dict,
+        "num_seeds": num_seeds,
+        "strategies": strategies
+    }
+
+    data = post_json("generateSeeds", payload)
+    if not data:
+        return "Error: no response"
+    if isinstance(data, dict) and "error" in data:
+        return f"Error: {data['error']}"
+
+    return json.dumps(data, indent=2)
+
+@mcp.tool()
+def export_kafl_project(target_function: str, output_directory: str,
+                       include_analysis: bool = True) -> str:
+    """Export complete kAFL fuzzing project to directory.
+
+    Generates a complete, ready-to-use fuzzing project including:
+    - Harness code and build files
+    - Seed corpus
+    - kAFL configuration
+    - Analysis report and documentation
+    - Helper scripts
+
+    Args:
+        target_function: Function to fuzz
+        output_directory: Where to create project
+        include_analysis: Include detailed analysis report
+
+    Returns:
+        JSON with project manifest and file locations
+    """
+    import json
+
+    payload = {
+        "target_function": target_function,
+        "output_directory": output_directory,
+        "include_analysis": include_analysis
+    }
+
+    data = post_json("exportKaflProject", payload)
+    if not data:
+        return "Error: no response"
+    if isinstance(data, dict) and "error" in data:
+        return f"Error: {data['error']}"
+
+    if isinstance(data, dict) and data.get("success"):
+        return f"Successfully exported kAFL project to: {output_directory}\n\n" + json.dumps(data.get("manifest", {}), indent=2)
+
+    return json.dumps(data, indent=2)
+
+
 if __name__ == "__main__":
     # Important: write any logs to stderr to avoid corrupting MCP stdio JSON-RPC
     print("Starting MCP bridge service...", file=_sys.stderr)
